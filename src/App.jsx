@@ -2,16 +2,42 @@ import React, { useState, useEffect, useRef } from "react";
 import { Plus, X, Trash2, ArrowLeft, FileText, PenLine, Youtube, ChevronRight, Upload, Link as LinkIcon, BookMarked, Eye, Pencil, FileUp } from "lucide-react";
 import * as mammoth from "mammoth";
 
-// Simple localStorage-backed persistence for standalone use (mirrors the
-// async get/set shape the rest of the app already expects).
+// Backed by the study-archive-server API (Postgres), with a localStorage
+// mirror so the app keeps working — and nothing typed is lost — if the
+// network drops or the server is briefly unreachable.
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8787";
+const API_KEY = import.meta.env.VITE_API_KEY || "";
+const LOCAL_CACHE_KEY = "study-archive-data-v1";
+
 const storage = {
   async get(key) {
-    const value = window.localStorage.getItem(key);
-    if (value === null) throw new Error("not found");
-    return { key, value };
+    try {
+      const res = await fetch(`${API_URL}/api/data`, {
+        headers: { "x-api-key": API_KEY },
+      });
+      if (res.status === 404) throw new Error("not found");
+      if (!res.ok) throw new Error(`server responded ${res.status}`);
+      const data = await res.json();
+      const value = JSON.stringify(data);
+      window.localStorage.setItem(LOCAL_CACHE_KEY, value);
+      return { key, value };
+    } catch (e) {
+      const cached = window.localStorage.getItem(LOCAL_CACHE_KEY);
+      if (cached) {
+        console.warn("Could not reach the server, using local cache:", e.message);
+        return { key, value: cached };
+      }
+      throw e;
+    }
   },
   async set(key, value) {
-    window.localStorage.setItem(key, value);
+    window.localStorage.setItem(LOCAL_CACHE_KEY, value);
+    const res = await fetch(`${API_URL}/api/data`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", "x-api-key": API_KEY },
+      body: value,
+    });
+    if (!res.ok) throw new Error(`server save failed: ${res.status}`);
     return { key, value };
   },
 };
@@ -404,6 +430,7 @@ export default function App() {
   const [view, setView] = useState({ level: "topics", topicId: null, chapterId: null });
   const [modal, setModal] = useState(null); // {type: 'addTopic'|'addChapter'|'addNote'|'addHand'|'addVideo'}
   const [reading, setReading] = useState(null); // {kind, item}
+  const [syncStatus, setSyncStatus] = useState("synced"); // 'synced' | 'saving' | 'offline'
   const skipSave = useRef(true);
 
   useEffect(() => {
@@ -435,10 +462,13 @@ export default function App() {
       return;
     }
     (async () => {
+      setSyncStatus("saving");
       try {
         await storage.set(STORAGE_KEY, JSON.stringify(data));
+        setSyncStatus("synced");
       } catch (e) {
         console.error("save failed", e);
+        setSyncStatus("offline");
       }
     })();
   }, [data, loaded]);
@@ -684,10 +714,36 @@ export default function App() {
         .md-content strong { font-weight: 600; }
       `}</style>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-        <BookMarked size={20} color="#EDE6D3" />
-        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 22, fontWeight: 700, color: "#EDE6D3" }}>
-          The Archive
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <BookMarked size={20} color="#EDE6D3" />
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 22, fontWeight: 700, color: "#EDE6D3" }}>
+            The Archive
+          </div>
+        </div>
+        <div
+          title={syncStatus === "offline" ? "Couldn't reach the server — your latest changes are only saved locally in this browser." : undefined}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontFamily: "'IBM Plex Mono', monospace",
+            fontSize: 11,
+            letterSpacing: "0.04em",
+            textTransform: "uppercase",
+            color: syncStatus === "offline" ? "#E0A458" : "#6E9B8C",
+          }}
+        >
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: syncStatus === "offline" ? "#E0A458" : syncStatus === "saving" ? "#8A9199" : "#6E9B8C",
+              display: "inline-block",
+            }}
+          />
+          {syncStatus === "offline" ? "saved locally only" : syncStatus === "saving" ? "saving…" : "synced"}
         </div>
       </div>
       <div style={{ fontSize: 12.5, color: "#8A9199", marginBottom: 26, fontFamily: "'IBM Plex Mono', monospace" }}>
