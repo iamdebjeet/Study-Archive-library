@@ -424,12 +424,75 @@ const btnPrimary = (color) => ({
   fontFamily: "'Inter', sans-serif",
 });
 
+const DELETE_PASSWORD = "Arc@Del@123";
+
+function PasswordConfirmModal({ message, onConfirm, onClose }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  function trySubmit() {
+    if (password === DELETE_PASSWORD) {
+      onConfirm();
+    } else {
+      setError("Incorrect password");
+      setPassword("");
+    }
+  }
+
+  return (
+    <Modal title="Confirm delete" onClose={onClose}>
+      <div style={{ fontSize: 14, color: "#26241B", marginBottom: 14, fontFamily: "'Inter', sans-serif" }}>
+        {message}
+      </div>
+      <input
+        autoFocus
+        type="password"
+        style={inputStyle}
+        placeholder="Enter password"
+        value={password}
+        onChange={(e) => {
+          setPassword(e.target.value);
+          setError("");
+        }}
+        onKeyDown={(e) => e.key === "Enter" && trySubmit()}
+      />
+      {error && (
+        <div style={{ fontSize: 12.5, color: "#B14B32", marginTop: -8, marginBottom: 14, fontFamily: "'Inter', sans-serif" }}>
+          {error}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+        <button
+          onClick={onClose}
+          style={{
+            background: "none",
+            border: "1px solid #D8CEB0",
+            borderRadius: 6,
+            padding: "9px 18px",
+            fontSize: 13.5,
+            fontWeight: 600,
+            cursor: "pointer",
+            color: "#7A7259",
+            fontFamily: "'Inter', sans-serif",
+          }}
+        >
+          Cancel
+        </button>
+        <button style={btnPrimary("#B14B32")} onClick={trySubmit}>
+          Delete
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 export default function App() {
   const [data, setData] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState({ level: "topics", topicId: null, chapterId: null });
   const [modal, setModal] = useState(null); // {type: 'addTopic'|'addChapter'|'addNote'|'addHand'|'addVideo'}
   const [reading, setReading] = useState(null); // {kind, item}
+  const [confirmDelete, setConfirmDelete] = useState(null); // {message, action}
   const [syncStatus, setSyncStatus] = useState("synced"); // 'synced' | 'saving' | 'offline'
   const skipSave = useRef(true);
 
@@ -667,7 +730,10 @@ export default function App() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    deleteItem(topic.id, chapter.id, kind, item.id);
+                    setConfirmDelete({
+                      message: `Delete "${item.title}"?`,
+                      action: () => deleteItem(topic.id, chapter.id, kind, item.id),
+                    });
                   }}
                   style={{ background: "none", border: "none", color: "#B3A98A", cursor: "pointer" }}
                 >
@@ -767,7 +833,10 @@ export default function App() {
                   tabColor="#2F7A6C"
                   onClick={() => setView({ level: "chapters", topicId: t.id, chapterId: null })}
                   onDelete={() => {
-                    if (window.confirm(`Delete "${t.name}" and everything in it?`)) deleteTopic(t.id);
+                    setConfirmDelete({
+                      message: `Delete "${t.name}" and everything in it?`,
+                      action: () => deleteTopic(t.id),
+                    });
                   }}
                 />
               ))}
@@ -805,7 +874,10 @@ export default function App() {
                   tabColor="#C98A3E"
                   onClick={() => setView({ level: "chapter", topicId: topic.id, chapterId: c.id })}
                   onDelete={() => {
-                    if (window.confirm(`Delete chapter "${c.name}"?`)) deleteChapter(topic.id, c.id);
+                    setConfirmDelete({
+                      message: `Delete chapter "${c.name}"?`,
+                      action: () => deleteChapter(topic.id, c.id),
+                    });
                   }}
                 />
               ))}
@@ -897,6 +969,17 @@ export default function App() {
             }}
           />
         </Modal>
+      )}
+
+      {confirmDelete && (
+        <PasswordConfirmModal
+          message={confirmDelete.message}
+          onConfirm={() => {
+            confirmDelete.action();
+            setConfirmDelete(null);
+          }}
+          onClose={() => setConfirmDelete(null)}
+        />
       )}
 
       {reading && (
