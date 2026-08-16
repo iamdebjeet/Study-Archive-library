@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Plus, X, Trash2, ArrowLeft, FileText, PenLine, Youtube, ChevronRight, Upload, Link as LinkIcon, BookMarked, Eye, Pencil, FileUp } from "lucide-react";
+import { Plus, X, Trash2, ArrowLeft, FileText, PenLine, Youtube, ChevronRight, Upload, Link as LinkIcon, BookMarked, Eye, Pencil, FileUp, Volume2, Pause, Play, Square } from "lucide-react";
 import * as mammoth from "mammoth";
 
 // Backed by the study-archive-server API (Postgres), with a localStorage
@@ -245,6 +245,152 @@ function stripMarkdownPreview(md) {
 function MarkdownView({ content, format }) {
   const html = format === "html" ? content : markdownToHtml(content);
   return <div className="md-content" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+function extractPlainText(content, format) {
+  if (!content) return "";
+  const html = format === "html" ? content : markdownToHtml(content);
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  return (div.textContent || div.innerText || "").replace(/\s+/g, " ").trim();
+}
+
+function splitIntoSpeechChunks(text, maxLen = 200) {
+  const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+  const chunks = [];
+  let current = "";
+  for (const s of sentences) {
+    if (current && (current + s).length > maxLen) {
+      chunks.push(current.trim());
+      current = s;
+    } else {
+      current += s;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+function pickIndianVoice(voices) {
+  return (
+    voices.find((v) => v.lang === "en-IN") ||
+    voices.find((v) => v.lang?.toLowerCase().startsWith("en-in")) ||
+    voices.find((v) => /india/i.test(v.name)) ||
+    voices.find((v) => v.lang?.toLowerCase().startsWith("en")) ||
+    voices[0] ||
+    null
+  );
+}
+
+function ReadAloud({ text }) {
+  const [status, setStatus] = useState("idle"); // 'idle' | 'playing' | 'paused'
+  const [voiceLabel, setVoiceLabel] = useState("");
+  const chunksRef = useRef([]);
+  const idxRef = useRef(0);
+  const voiceRef = useRef(null);
+
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    function refreshVoice() {
+      const voices = window.speechSynthesis.getVoices();
+      if (!voices.length) return;
+      const voice = pickIndianVoice(voices);
+      voiceRef.current = voice;
+      setVoiceLabel(voice ? voice.name : "");
+    }
+    refreshVoice();
+    window.speechSynthesis.addEventListener("voiceschanged", refreshVoice);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", refreshVoice);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    };
+  }, []);
+
+  if (!("speechSynthesis" in window)) return null;
+  if (!text) return null;
+
+  function speakFrom(i) {
+    const chunks = chunksRef.current;
+    if (i >= chunks.length) {
+      setStatus("idle");
+      return;
+    }
+    const utter = new SpeechSynthesisUtterance(chunks[i]);
+    if (voiceRef.current) utter.voice = voiceRef.current;
+    utter.lang = voiceRef.current?.lang || "en-IN";
+    utter.rate = 0.92;
+    utter.pitch = 1;
+    utter.onend = () => {
+      idxRef.current = i + 1;
+      speakFrom(i + 1);
+    };
+    utter.onerror = () => setStatus("idle");
+    window.speechSynthesis.speak(utter);
+  }
+
+  function handlePlay() {
+    if (status === "paused") {
+      window.speechSynthesis.resume();
+      setStatus("playing");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    chunksRef.current = splitIntoSpeechChunks(text);
+    idxRef.current = 0;
+    setStatus("playing");
+    speakFrom(0);
+  }
+  function handlePause() {
+    window.speechSynthesis.pause();
+    setStatus("paused");
+  }
+  function handleStop() {
+    window.speechSynthesis.cancel();
+    setStatus("idle");
+  }
+
+  const iconBtn = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    background: "#EDE6D3",
+    border: "1px solid #D8CEB0",
+    borderRadius: 6,
+    padding: "7px 12px",
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: "pointer",
+    color: "#26241B",
+    fontFamily: "'Inter', sans-serif",
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+      {status !== "playing" && (
+        <button style={iconBtn} onClick={handlePlay}>
+          <Play size={14} /> {status === "paused" ? "Resume" : "Read aloud"}
+        </button>
+      )}
+      {status === "playing" && (
+        <button style={iconBtn} onClick={handlePause}>
+          <Pause size={14} /> Pause
+        </button>
+      )}
+      {status !== "idle" && (
+        <button style={iconBtn} onClick={handleStop}>
+          <Square size={14} /> Stop
+        </button>
+      )}
+      {voiceLabel && (
+        <span style={{ fontSize: 11, color: "#8C8367", display: "inline-flex", alignItems: "center", gap: 4 }}>
+          <Volume2 size={12} /> {voiceLabel}
+        </span>
+      )}
+    </div>
+  );
 }
 
 function Tab({ accent, children, style }) {
@@ -990,7 +1136,10 @@ export default function App() {
         >
           {reading.kind === "notes" &&
             (reading.item.content ? (
-              <MarkdownView content={reading.item.content} format={reading.item.format} />
+              <>
+                <ReadAloud text={extractPlainText(reading.item.content, reading.item.format)} />
+                <MarkdownView content={reading.item.content} format={reading.item.format} />
+              </>
             ) : (
               <div style={{ color: "#8C8367", fontStyle: "italic" }}>This note is empty.</div>
             ))}
