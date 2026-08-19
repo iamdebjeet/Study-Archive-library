@@ -8,6 +8,7 @@ import * as mammoth from "mammoth";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8787";
 const API_KEY = import.meta.env.VITE_API_KEY || "";
 const LOCAL_CACHE_KEY = "study-archive-data-v1";
+const TTS_VOICE_KEY = "study-archive-tts-voice";
 
 const storage = {
   async get(key) {
@@ -272,31 +273,173 @@ function splitIntoSpeechChunks(text, maxLen = 200) {
 }
 
 function pickIndianVoice(voices) {
-  return (
-    voices.find((v) => v.lang === "en-IN") ||
-    voices.find((v) => v.lang?.toLowerCase().startsWith("en-in")) ||
-    voices.find((v) => /india/i.test(v.name)) ||
-    voices.find((v) => v.lang?.toLowerCase().startsWith("en")) ||
-    voices[0] ||
-    null
-  );
+  if (!voices.length) return null;
+  function score(v) {
+    let s = 0;
+    if (v.lang === "en-IN") s += 100;
+    else if (v.lang?.toLowerCase().startsWith("en-in")) s += 90;
+    else if (/india/i.test(v.name)) s += 70;
+    else if (v.lang?.toLowerCase().startsWith("en")) s += 30;
+    // Network ("cloud") voices are generally far more natural-sounding
+    // than the robotic offline/local voices bundled with the OS.
+    if (!v.localService) s += 20;
+    return s;
+  }
+  return voices.slice().sort((a, b) => score(b) - score(a))[0] || null;
 }
 
-function ReadAloud({ text }) {
-  const [status, setStatus] = useState("idle"); // 'idle' | 'playing' | 'paused'
-  const [voiceLabel, setVoiceLabel] = useState("");
-  const chunksRef = useRef([]);
-  const idxRef = useRef(0);
+function getPreferredVoice(voices) {
+  const savedName = localStorage.getItem(TTS_VOICE_KEY);
+  if (savedName) {
+    const saved = voices.find((v) => v.name === savedName);
+    if (saved) return saved;
+  }
+  return pickIndianVoice(voices);
+}
+
+// Speaks chunks back to back with a short breathing pause and slight pitch
+// drift between sentences, since a single flat pitch/rate across a whole
+// utterance is what makes browser TTS sound robotic. Returns a stop() fn.
+function speakChunkSequence(chunks, voice, onDone) {
+  let stopped = false;
+  function next(i) {
+    if (stopped) return;
+    if (i >= chunks.length) {
+      onDone?.();
+      return;
+    }
+    const utter = new SpeechSynthesisUtterance(chunks[i]);
+    if (voice) utter.voice = voice;
+    utter.lang = voice?.lang || "en-IN";
+    utter.rate = 0.95;
+    utter.pitch = 1 + (Math.random() * 0.05 - 0.025);
+    utter.onend = () => {
+      if (stopped) return;
+      setTimeout(() => next(i + 1), 180);
+    };
+    utter.onerror = () => onDone?.();
+    window.speechSynthesis.speak(utter);
+  }
+  next(0);
+  return () => {
+    stopped = true;
+  };
+}
+
+function SelectionReadButton() {
+  const [sel, setSel] = useState(null); // {x, y, text}
   const voiceRef = useRef(null);
+  const stopRef = useRef(null);
 
   useEffect(() => {
     if (!("speechSynthesis" in window)) return;
     function refreshVoice() {
       const voices = window.speechSynthesis.getVoices();
-      if (!voices.length) return;
-      const voice = pickIndianVoice(voices);
+      if (voices.length) voiceRef.current = getPreferredVoice(voices);
+    }
+    refreshVoice();
+    window.speechSynthesis.addEventListener("voiceschanged", refreshVoice);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", refreshVoice);
+  }, []);
+
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+
+    function handleSelectionUp(e) {
+      if (e.target?.closest?.("[data-selection-read-btn]")) return;
+      const selection = window.getSelection();
+      const text = selection ? selection.toString().trim() : "";
+      if (!text || text.length < 2) {
+        setSel(null);
+        return;
+      }
+      const anchorNode = selection.anchorNode;
+      const anchorEl = anchorNode?.nodeType === 3 ? anchorNode.parentElement : anchorNode;
+      if (anchorEl?.closest?.("input, textarea, [contenteditable]")) {
+        setSel(null);
+        return;
+      }
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      if (!rect || (rect.width === 0 && rect.height === 0)) {
+        setSel(null);
+        return;
+      }
+      setSel({ x: rect.right, y: rect.top, text });
+    }
+    function handleScroll() {
+      setSel(null);
+    }
+    document.addEventListener("mouseup", handleSelectionUp);
+    document.addEventListener("keyup", handleSelectionUp);
+    document.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("mouseup", handleSelectionUp);
+      document.removeEventListener("keyup", handleSelectionUp);
+      document.removeEventListener("scroll", handleScroll, true);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopRef.current?.();
+      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    };
+  }, []);
+
+  if (!("speechSynthesis" in window) || !sel) return null;
+
+  function handleClick() {
+    stopRef.current?.();
+    window.speechSynthesis.cancel();
+    const chunks = splitIntoSpeechChunks(sel.text);
+    stopRef.current = speakChunkSequence(chunks, voiceRef.current);
+    setSel(null);
+  }
+
+  return (
+    <button
+      data-selection-read-btn
+      onClick={handleClick}
+      title="Read selected text aloud"
+      style={{
+        position: "fixed",
+        left: Math.min(sel.x + 6, window.innerWidth - 38),
+        top: Math.max(sel.y - 38, 8),
+        zIndex: 100,
+        background: "#2F7A6C",
+        color: "#FBF8F0",
+        border: "none",
+        borderRadius: "50%",
+        width: 30,
+        height: 30,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: "pointer",
+        boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+      }}
+    >
+      <Volume2 size={15} />
+    </button>
+  );
+}
+
+function ReadAloud({ text }) {
+  const [status, setStatus] = useState("idle"); // 'idle' | 'playing' | 'paused'
+  const [voices, setVoices] = useState([]);
+  const [voiceName, setVoiceName] = useState("");
+  const voiceRef = useRef(null);
+  const stopRef = useRef(null);
+
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    function refreshVoice() {
+      const all = window.speechSynthesis.getVoices();
+      if (!all.length) return;
+      setVoices(all);
+      const voice = getPreferredVoice(all);
       voiceRef.current = voice;
-      setVoiceLabel(voice ? voice.name : "");
+      setVoiceName(voice ? voice.name : "");
     }
     refreshVoice();
     window.speechSynthesis.addEventListener("voiceschanged", refreshVoice);
@@ -305,6 +448,7 @@ function ReadAloud({ text }) {
 
   useEffect(() => {
     return () => {
+      stopRef.current?.();
       if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     };
   }, []);
@@ -312,23 +456,16 @@ function ReadAloud({ text }) {
   if (!("speechSynthesis" in window)) return null;
   if (!text) return null;
 
-  function speakFrom(i) {
-    const chunks = chunksRef.current;
-    if (i >= chunks.length) {
+  function handleVoiceChange(e) {
+    const name = e.target.value;
+    setVoiceName(name);
+    voiceRef.current = voices.find((v) => v.name === name) || null;
+    localStorage.setItem(TTS_VOICE_KEY, name);
+    if (status !== "idle") {
+      stopRef.current?.();
+      window.speechSynthesis.cancel();
       setStatus("idle");
-      return;
     }
-    const utter = new SpeechSynthesisUtterance(chunks[i]);
-    if (voiceRef.current) utter.voice = voiceRef.current;
-    utter.lang = voiceRef.current?.lang || "en-IN";
-    utter.rate = 0.92;
-    utter.pitch = 1;
-    utter.onend = () => {
-      idxRef.current = i + 1;
-      speakFrom(i + 1);
-    };
-    utter.onerror = () => setStatus("idle");
-    window.speechSynthesis.speak(utter);
   }
 
   function handlePlay() {
@@ -337,17 +474,18 @@ function ReadAloud({ text }) {
       setStatus("playing");
       return;
     }
+    stopRef.current?.();
     window.speechSynthesis.cancel();
-    chunksRef.current = splitIntoSpeechChunks(text);
-    idxRef.current = 0;
+    const chunks = splitIntoSpeechChunks(text);
     setStatus("playing");
-    speakFrom(0);
+    stopRef.current = speakChunkSequence(chunks, voiceRef.current, () => setStatus("idle"));
   }
   function handlePause() {
     window.speechSynthesis.pause();
     setStatus("paused");
   }
   function handleStop() {
+    stopRef.current?.();
     window.speechSynthesis.cancel();
     setStatus("idle");
   }
@@ -384,10 +522,28 @@ function ReadAloud({ text }) {
           <Square size={14} /> Stop
         </button>
       )}
-      {voiceLabel && (
-        <span style={{ fontSize: 11, color: "#8C8367", display: "inline-flex", alignItems: "center", gap: 4 }}>
-          <Volume2 size={12} /> {voiceLabel}
-        </span>
+      {voices.length > 0 && (
+        <select
+          value={voiceName}
+          onChange={handleVoiceChange}
+          title="If this voice sounds robotic, try another one installed on your device"
+          style={{
+            fontSize: 11.5,
+            color: "#26241B",
+            background: "#FBF8F0",
+            border: "1px solid #D8CEB0",
+            borderRadius: 6,
+            padding: "6px 8px",
+            fontFamily: "'Inter', sans-serif",
+            maxWidth: 220,
+          }}
+        >
+          {voices.map((v) => (
+            <option key={v.name} value={v.name}>
+              {v.name} ({v.lang}){v.localService ? "" : " ★"}
+            </option>
+          ))}
+        </select>
       )}
     </div>
   );
@@ -1151,6 +1307,8 @@ export default function App() {
           )}
         </Modal>
       )}
+
+      <SelectionReadButton />
     </div>
   );
 }
